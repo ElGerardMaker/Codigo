@@ -1,0 +1,265 @@
+[7:17 p.m., 4/4/2025] Jhonny: código de los sensores: import network
+import socket
+import time
+import json
+from machine import ADC, Pin
+import math
+
+# Configuración WiFi
+SSID = 'INFINITUMCE2E'
+PASSWORD = 'PGJu36qKFu'
+SERVER_IP = "192.168.1.65"
+SERVER_PORT = 80
+
+# Calibración basada en pruebas reales
+NOISE_FLOOR = 38         # Valor mínimo (silencio)
+MAX_DB = 120             # Valor máximo aceptado
+CALIBRATION_M = 32.33    # Pendiente ajustada (voltaje a dB)
+CALIBRATION_B = -1.0     # Offset ajustado
+
+# Inicializar ADC
+adc = ADC(Pin(26))
+if hasattr(adc, 'atten'):
+    adc.atten(ADC.ATTN_11DB)
+
+# Conexión WiFi
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect(SSID, PASSWORD)
+
+while not wlan.isconnected():
+    print("Conectando a WiFi...")
+    time.sleep(1)
+
+print("Conectado a WiFi - IP:", wlan.ifconfig()[0])
+
+def read_peak_sound_level(samples=200, interval_us=100):
+    """
+    Lee una serie de muestras ADC para calcular el nivel de sonido en dB.
+    """
+    values = []
+    for _ in range(samples):
+        values.append(adc.read_u16())
+        time.sleep_us(interval_us)
+
+    max_val = max(values)
+    min_val = min(values)
+    p2p_voltage = (max_val - min_val) / 65535 * 3.3
+
+    if p2p_voltage < 0.01:
+        return NOISE_FLOOR
+
+    dB = CALIBRATION_M * p2p_voltage + CALIBRATION_B
+    return min(MAX_DB, max(NOISE_FLOOR, dB))
+
+def send_data():
+    try:
+        # Medir y promediar
+        readings = [read_peak_sound_level() for _ in range(3)]
+        dB = sum(readings) / len(readings)
+
+        print(f"dB promedio: {dB:.2f}")
+
+        data = json.dumps({"sensor1": [dB]})
+        
+        headers = "POST /update HTTP/1.1\r\n"
+        headers += f"Host: {SERVER_IP}\r\n"
+        headers += "Content-Type: application/json\r\n"
+        headers += f"Content-Length: {len(data)}\r\n\r\n"
+
+        addr = socket.getaddrinfo(SERVER_IP, SERVER_PORT)[0][-1]
+        s = socket.socket()
+        s.connect(addr)
+        s.send(headers.encode() + data.encode())
+        s.close()
+
+    except Exception as e:
+        print("Error:", e)
+
+# Bucle principal
+while True:
+    send_data()
+    time.sleep(1)
+[7:18 p.m., 4/4/2025] Jhonny: codigo servidor HTTP: import time
+import network
+import socket
+import json
+
+# Configuración de WiFi
+SSID = 'INFINITUMCE2E'
+PASSWORD = 'PGJu36qKFu'
+
+# Conectar a WiFi
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect(SSID, PASSWORD)
+
+while not wlan.isconnected():
+    print("🔄 Conectando a WiFi...")
+    time.sleep(1)
+
+print("✅ Conectado a WiFi - IP:", wlan.ifconfig()[0])
+
+# Crear socket del servidor
+addr = socket.getaddrinfo("0.0.0.0", 80)[0][-1]
+s = socket.socket()
+s.bind(addr)
+s.listen(5)
+print("🚀 Servidor HTTP corriendo en:", addr)
+
+# Datos de sensores (mantener máximo 10 valores)
+sensor_data = {
+    "sensor1": [],
+    "sensor2": [],
+    "sensor3": []
+}
+
+# HTML con gráfica más pequeña y mejor manejo
+html = """<!DOCTYPE html>
+<html>
+<head>
+    <title>Monitor de Sensores</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .chart-container {
+            width: 600px;
+            height: 400px;
+            margin: 0 auto;
+        }
+    </style>
+    <script>
+        async function updateData() {
+            try {
+                const response = await fetch('/data');
+                const data = await response.json();
+                
+                // Actualizar gráfica solo si hay datos nuevos
+                if (data.sensor1.length > 0) {
+                    const labels = Array.from({length: 10}, (_, i) => i+1);
+                    myChart.data.labels = labels;
+                    myChart.data.datasets[0].data = data.sensor1;
+                    myChart.data.datasets[1].data = data.sensor2;
+                    myChart.data.datasets[2].data = data.sensor3;
+                    myChart.update();
+                }
+            } catch (e) {
+                console.error("Error al obtener datos:", e);
+            }
+        }
+
+        // Actualizar cada 2 segundos
+        setInterval(updateData, 2000);
+
+        window.onload = () => {
+            const ctx = document.getElementById('myChart').getContext('2d');
+            window.myChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 10}, (_, i) => i+1),
+                    datasets: [
+                        { 
+                            label: 'Sensor 1', 
+                            data: [], 
+                            borderColor: 'red', 
+                            borderWidth: 2,
+                            pointRadius: 3,
+                            fill: false 
+                        },
+                        { 
+                            label: 'Sensor 2', 
+                            data: [], 
+                            borderColor: 'blue', 
+                            borderWidth: 2,
+                            pointRadius: 3,
+                            fill: false 
+                        },
+                        { 
+                            label: 'Sensor 3', 
+                            data: [], 
+                            borderColor: 'green', 
+                            borderWidth: 2,
+                            pointRadius: 3,
+                            fill: false 
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            min: 0,
+                            max: 100
+                        }
+                    }
+                }
+            });
+            updateData(); // Cargar datos iniciales
+        };
+    </script>
+</head>
+<body>
+    <h1 style="text-align: center;">Monitor de Sensores</h1>
+    <div class="chart-container">
+        <canvas id="myChart"></canvas>
+    </div>
+</body>
+</html>
+"""
+
+# Bucle principal del servidor
+while True:
+    try:
+        cl, addr = s.accept()
+        cl.settimeout(5)
+        
+        request = cl.recv(1024).decode()
+        if not request:
+            cl.close()
+            continue
+            
+        # Manejar diferentes rutas
+        if "POST /update" in request:
+            try:
+                # Extraer datos JSON
+                start = request.find("{")
+                end = request.rfind("}") + 1
+                if start != -1 and end != -1:
+                    json_str = request[start:end]
+                    data = json.loads(json_str)
+                    print("Datos recibidos:", data)
+                    
+                    # Actualizar datos del sensor correspondiente
+                    for key in data:
+                        if key in sensor_data:
+                            # Asegurarse de que solo agregamos un valor a la vez
+                            if isinstance(data[key], list):
+                                sensor_data[key].extend(data[key])
+                            else:
+                                sensor_data[key].append(data[key])
+                            
+                            # Mantener solo los últimos 10 valores
+                            if len(sensor_data[key]) > 10:
+                                sensor_data[key] = sensor_data[key][-10:]
+                    
+                    cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK")
+                else:
+                    cl.send("HTTP/1.1 400 Bad Request\r\n\r\n")
+            except Exception as e:
+                print("Error procesando datos:", e)
+                cl.send("HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                
+        elif "GET /data" in request:
+            cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+            cl.send(json.dumps(sensor_data))
+            
+        else:  # Página principal
+            cl.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n")
+            cl.send(html)
+            
+        cl.close()
+        
+    except Exception as e:
+        print("Error en el servidor:", e)
+        if 'cl' in locals():
+            cl.close()
